@@ -1,4 +1,3 @@
-### Website Description
 
 **Enhanced Layered Waveform Visualizer**
 
