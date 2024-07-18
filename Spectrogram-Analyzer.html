@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Audio Spectrogram Analyzer</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        #container { display: flex; flex-direction: column; align-items: center; }
+        #spectrogram-container { position: relative; margin: 20px 0; }
+        #spectrogram { border: 1px solid #ccc; }
+        #color-legend { height: 20px; width: 200px; margin: 10px 0; }
+        #controls { margin: 20px 0; }
+        #annotations { position: absolute; top: 0; left: 0; pointer-events: none; }
+        .annotation { position: absolute; width: 10px; height: 10px; background: red; border-radius: 50%; }
+        #data-readout { margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Advanced Audio Spectrogram Analyzer</h1>
+        <div id="controls">
+            <input type="file" id="audioFile" accept="audio/*">
+            <button id="generateBtn" disabled>Generate Spectrogram</button>
+            <select id="colorScheme">
+                <option value="default">Default</option>
+                <option value="grayscale">Grayscale</option>
+                <option value="rainbow">Rainbow</option>
+            </select>
+            <button id="resetViewBtn">Reset View</button>
+            <button id="toggleAnnotationBtn">Toggle Annotation Mode</button>
+        </div>
+        <div id="spectrogram-container">
+            <canvas id="spectrogram"></canvas>
+            <canvas id="annotations"></canvas>
+        </div>
+        <canvas id="color-legend"></canvas>
+        <div id="data-readout"></div>
+    </div>
+
+    <script>
+    let audioContext, audioBuffer, spectrogramData;
+    let isAnnotationMode = false;
+    let annotations = [];
+    let zoomLevel = 1;
+    let panOffset = { x: 0, y: 0 };
+
+    const spectrogramCanvas = document.getElementById('spectrogram');
+    const annotationsCanvas = document.getElementById('annotations');
+    const ctx = spectrogramCanvas.getContext('2d');
+    const annotCtx = annotationsCanvas.getContext('2d');
+    const fileInput = document.getElementById('audioFile');
+    const generateBtn = document.getElementById('generateBtn');
+    const colorSchemeSelect = document.getElementById('colorScheme');
+    const resetViewBtn = document.getElementById('resetViewBtn');
+    const toggleAnnotationBtn = document.getElementById('toggleAnnotationBtn');
+    const dataReadout = document.getElementById('data-readout');
+
+    fileInput.addEventListener('change', handleFileSelect);
+    generateBtn.addEventListener('click', generateSpectrogram);
+    colorSchemeSelect.addEventListener('change', updateColorScheme);
+    resetViewBtn.addEventListener('click', resetView);
+    toggleAnnotationBtn.addEventListener('click', toggleAnnotationMode);
+    spectrogramCanvas.addEventListener('mousedown', handleMouseDown);
+    spectrogramCanvas.addEventListener('mousemove', handleMouseMove);
+    spectrogramCanvas.addEventListener('mouseup', handleMouseUp);
+    spectrogramCanvas.addEventListener('wheel', handleWheel);
+
+    async function handleFileSelect(event) {
+        const file = event.target.files[0];
+        if (file) {
+            const arrayBuffer = await file.arrayBuffer();
+            await setupAudioContext(arrayBuffer);
+            generateBtn.disabled = false;
+        }
+    }
+
+    async function setupAudioContext(arrayBuffer) {
+        if (audioContext) {
+            audioContext.close();
+        }
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        try {
+            audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        } catch (error) {
+            console.error('Error decoding audio data', error);
+        }
+    }
+
+    async function generateSpectrogram() {
+        if (!audioBuffer) return;
+
+        const offlineContext = new OfflineAudioContext(
+            audioBuffer.numberOfChannels,
+            audioBuffer.length,
+            audioBuffer.sampleRate
+        );
+
+        const source = offlineContext.createBufferSource();
+        source.buffer = audioBuffer;
+
+        const analyser = offlineContext.createAnalyser();
+        analyser.fftSize = 2048;
+        const bufferLength = analyser.frequencyBinCount;
+
+        source.connect(analyser);
+        analyser.connect(offlineContext.destination);
+
+        source.start(0);
+
+        const freqData = new Uint8Array(bufferLength);
+        spectrogramData = [];
+
+        await offlineContext.startRendering();
+
+        const stepSize = Math.floor(audioBuffer.length / 1000); // Adjust for desired width
+        for (let i = 0; i < audioBuffer.length; i += stepSize) {
+            analyser.getByteFrequencyData(freqData);
+            spectrogramData.push(new Uint8Array(freqData));
+        }
+
+        drawSpectrogram();
+        drawColorLegend();
+    }
+
+    function drawSpectrogram() {
+        const width = spectrogramData.length;
+        const height = spectrogramData[0].length;
+
+        spectrogramCanvas.width = width;
+        spectrogramCanvas.height = height;
+        annotationsCanvas.width = width;
+        annotationsCanvas.height = height;
+
+        const imageData = ctx.createImageData(width, height);
+
+        for (let x = 0; x < width; x++) {
+            for (let y = 0; y < height; y++) {
+                const index = (y * width + x) * 4;
+                const value = spectrogramData[x][height - y - 1];
+                const color = getColor(value);
+                
+                imageData.data[index] = color.r;
+                imageData.data[index + 1] = color.g;
+                imageData.data[index + 2] = color.b;
+                imageData.data[index + 3] = 255;
+            }
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        drawAxes();
+        drawAnnotations();
+    }
+
+    function drawAxes() {
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, spectrogramCanvas.width, 30);
+        ctx.fillRect(0, 0, 50, spectrogramCanvas.height);
+
+        ctx.fillStyle = 'black';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'center';
+
+        // Time axis
+        const duration = audioBuffer.duration;
+        for (let i = 0; i <= 10; i++) {
+            const x = (i / 10) * spectrogramCanvas.width;
+            const time = (i / 10) * duration;
+            ctx.fillText(time.toFixed(1) + 's', x, 20);
+        }
+
+        // Frequency axis
+        ctx.textAlign = 'right';
+        const maxFreq = audioContext.sampleRate / 2;
+        for (let i = 0; i <= 10; i++) {
+            const y = spectrogramCanvas.height - (i / 10) * spectrogramCanvas.height;
+            const freq = (i / 10) * maxFreq;
+            ctx.fillText(Math.round(freq) + 'Hz', 45, y);
+        }
+    }
+
+    function getColor(value) {
+        const scheme = colorSchemeSelect.value;
+        if (scheme === 'grayscale') {
+            return { r: value, g: value, b: value };
+        } else if (scheme === 'rainbow') {
+            const hue = (1 - value / 255) * 240;
+            return hslToRgb(hue / 360, 1, 0.5);
+        } else {
+            // Default color scheme
+            if (value < 64) {
+                return { r: 0, g: 0, b: value * 4 };
+            } else if (value < 128) {
+                return { r: 0, g: (value - 64) * 4, b: 255 };
+            } else if (value < 192) {
+                return { r: (value - 128) * 4, g: 255, b: 255 - (value - 128) * 4 };
+            } else {
+                return { r: 255, g: 255 - (value - 192) * 4, b: 0 };
+            }
+        }
+    }
+
+    function hslToRgb(h, s, l) {
+        let r, g, b;
+        if (s === 0) {
+            r = g = b = l;
+        } else {
+            const hue2rgb = (p, q, t) => {
+                if (t < 0) t += 1;
+                if (t > 1) t -= 1;
+                if (t < 1/6) return p + (q - p) * 6 * t;
+                if (t < 1/2) return q;
+                if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                return p;
+            };
+            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            const p = 2 * l - q;
+            r = hue2rgb(p, q, h + 1/3);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1/3);
+        }
+        return {
+            r: Math.round(r * 255),
+            g: Math.round(g * 255),
+            b: Math.round(b * 255)
+        };
+    }
+
+    function drawColorLegend() {
+        const legendCanvas = document.getElementById('color-legend');
+        const lgdCtx = legendCanvas.getContext('2d');
+        const width = legendCanvas.width;
+        const height = legendCanvas.height;
+
+        for (let x = 0; x < width; x++) {
+            const value = Math.floor((x / width) * 255);
+            const color = getColor(value);
+            lgdCtx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+            lgdCtx.fillRect(x, 0, 1, height);
+        }
+
+        lgdCtx.fillStyle = 'black';
+        lgdCtx.font = '12px Arial';
+        lgdCtx.textAlign = 'center';
+        lgdCtx.fillText('Low', 20, height - 5);
+        lgdCtx.fillText('Intensity', width / 2, height - 5);
+        lgdCtx.fillText('High', width - 20, height - 5);
+    }
+
+    function updateColorScheme() {
+        if (spectrogramData) {
+            drawSpectrogram();
+            drawColorLegend();
+        }
+    }
+
+    function toggleAnnotationMode() {
+        isAnnotationMode = !isAnnotationMode;
+        toggleAnnotationBtn.textContent = isAnnotationMode ? 'Disable Annotation' : 'Enable Annotation';
+    }
+
+    function handleMouseDown(event) {
+        if (isAnnotationMode) {
+            const rect = spectrogramCanvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            annotations.push({ x, y });
+            drawAnnotations();
+            updateDataReadout(x, y);
+        }
+    }
+
+    function handleMouseMove(event) {
+        const rect = spectrogramCanvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        updateDataReadout(x, y);
+    }
+
+    function handleMouseUp() {
+        // Placeholder for potential drag operations
+    }
+
+    function handleWheel(event) {
+        event.preventDefault();
+        const delta = Math.sign(event.deltaY);
+        zoomLevel = Math.max(1, zoomLevel - delta * 0.1);
+        drawSpectrogram();
+    }
+
+    function drawAnnotations() {
+        annotCtx.clearRect(0, 0, annotationsCanvas.width, annotationsCanvas.height);
+        annotations.forEach(point => {
+            annotCtx.beginPath();
+            annotCtx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
+            annotCtx.fillStyle = 'red';
+            annotCtx.fill();
+        });
+    }
+
+    function updateDataReadout(x, y) {
+        if (!spectrogramData) return;
+
+        const time = (x / spectrogramCanvas.width) * audioBuffer.duration;
+        const maxFreq = audioContext.sampleRate / 2;
+        const freq = ((spectrogramCanvas.height - y) / spectrogramCanvas.height) * maxFreq;
+        const intensity = spectrogramData[Math.floor(x)][spectrogramData[0].length - 1 - Math.floor(y)];
+
+        dataReadout.textContent = `Time: ${time.toFixed(2)}s, Frequency: ${Math.round(freq)}Hz, Intensity: ${intensity}`;
+    }
+
+    function resetView() {
+        zoomLevel = 1;
+        panOffset = { x: 0, y: 0 };
+        drawSpectrogram();
+    }
+
+    </script>
+</body>
+</html>
